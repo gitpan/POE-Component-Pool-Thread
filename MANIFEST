@@ -1,0 +1,8 @@
+CHANGES
+FUNK
+Makefile.PL
+MANIFEST			This list of files
+MANIFEST.SKIP
+META.yml
+t/pre_interface.t
+Thread.pm
