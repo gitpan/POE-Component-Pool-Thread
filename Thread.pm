@@ -17,7 +17,7 @@ use IO::Handle;
 use POE qw( Pipe::OneWay Filter::Line Wheel::ReadWrite );
 use Fcntl;
 
-*VERSION = \0.011;
+*VERSION = \0.013;
 
 use constant DEBUG => 0;
 
@@ -28,6 +28,8 @@ sub new {
     
     $opt{inline_states} ||= {};
     $opt{StartThreads}  ||= 0;
+    $opt{MinFree}       ||= 2;
+    $opt{MaxFree}       ||= 10;
 
     POE::Session->create    
     ( inline_states => {
@@ -54,6 +56,8 @@ sub new {
                 $kernel->yield("-spawn_thread");
             }
 
+            $heap->{queue} = [];
+
             goto $opt{inline_states}{_start} if $opt{inline_states}{_start};
         },
 
@@ -61,9 +65,9 @@ sub new {
             my ($kernel, $heap) = @_[ KERNEL, HEAP ];
 
             DEBUG && warn "Joining all threads";
-            for my $tid (grep int, keys %$heap) {
-                $heap->{$tid}{iqueue}->enqueue("last");
-                $heap->{$tid}{thread}->join;
+            for my $tid (keys %{ $heap->{thread} }) {
+                $heap->{thread}{$tid}{iqueue}->enqueue("last");
+                $heap->{thread}{$tid}{thread}->join;
             }
 
             goto $opt{inline_states}{_stop} if $opt{inline_states}{_stop};
@@ -98,7 +102,7 @@ sub new {
             
             my ($kernel, $heap, $tid) = @_[ KERNEL, HEAP, ARG0 ];
 
-            my $tdsc = delete $heap->{$tid} or return;
+            my $tdsc = delete $heap->{thread}{$tid} or return;
 
             $tdsc->{thread}->join;
 
@@ -111,9 +115,9 @@ sub new {
 
             DEBUG && warn "GC Called, thread finished task";
 
-            my $queue  = $heap->{queue} ||= [];
-            my $rqueue = $heap->{$tid}{rqueue};
-            my $iqueue = $heap->{$tid}{iqueue};
+            my $queue  = $heap->{queue};
+            my $rqueue = $heap->{thread}{$tid}{rqueue};
+            my $iqueue = $heap->{thread}{$tid}{iqueue};
 
             if ($rqueue->pending) {
                 if ($opt{CallBack}) {
@@ -133,12 +137,14 @@ sub new {
         -spawn_thread => sub {
             my ($kernel, $heap) = @_[ KERNEL, HEAP ];
             
+            return if $opt{MaxThreads} == scalar keys %{ $heap->{thread} };
             DEBUG && warn "Spawning a new thread";
 
             my $semaphore   = Thread::Semaphore->new;
             my $iqueue      = Thread::Queue->new;
             my $rqueue      = Thread::Queue->new;
             my $pipe_out    = $heap->{pipe_out};
+            my $queue       = $heap->{queue};
 
             my $thread      = threads->create
                 ( \&thread_entry_point, 
@@ -148,13 +154,20 @@ sub new {
                   fileno($pipe_out),
                   $opt{EntryPoint} );
 
-            $heap->{$thread->tid} = { 
+            $heap->{thread}{$thread->tid} = { 
                 semaphore   => $semaphore,
                 iqueue      => $iqueue,
                 rqueue      => $rqueue,
                 thread      => $thread,
                 lifespan    => 0, # Not currently used
             };
+
+            if (@$queue) {
+                my $args = &share([]);
+                push @$args, @{ shift @$queue };
+
+                $iqueue->enqueue($args);
+            }
         },
 
         run => sub {
@@ -162,8 +175,8 @@ sub new {
 
             DEBUG && warn "Assigned a task";
 
-            my @threads = map $heap->{$_}, grep int, keys %$heap;
-            my @free    = grep ${ $_->{semaphore} }, @threads;
+            my $thread = $heap->{thread};
+            my @free   = grep ${ $_->{semaphore} }, values %$thread;
 
             if (@free) {
                 my $tdsc = shift @free;
@@ -180,11 +193,11 @@ sub new {
                 $tdsc->{iqueue}->enqueue($sharg);
             }
             else {
-                push @{ $heap->{queue} ||= [] }, [ @arg ];
+                push @{ $heap->{queue} }, [ @arg ];
             }
 
             if (@free < $opt{MinFree}) {
-                unless (@threads >= $opt{MaxThreads}) {
+                unless (scalar(keys %$thread) >= $opt{MaxThreads}) {
                     $kernel->yield("-spawn_thread");
                 }
             }
