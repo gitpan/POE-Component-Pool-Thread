@@ -1,10 +1,12 @@
-#!/usr/bin/perl -l
+#!/usr/bin/perl
 
 use strict;
 use warnings FATAL => "all";
-use Test::Simple tests => 200;
 
+our $TOTAL_JOBS;
+BEGIN { $TOTAL_JOBS = 4 }
 use POE qw( Component::Pool::Thread );
+use Test::Simple tests => 2*$TOTAL_JOBS;
 
 POE::Component::Pool::Thread->new
 ( MaxFree       => 5,
@@ -24,7 +26,7 @@ POE::Component::Pool::Thread->new
 
         $kernel->yield(run => $i);
 
-        if ($i < 100) {
+        if ($i < $TOTAL_JOBS) {
             $kernel->yield(loop => $i + 1);
 
             # Simulate variable loads
@@ -40,18 +42,22 @@ sub thread_entry_point {
     # Simulate tasks that take time and block
     select undef, undef, undef, rand 0.5;
 
-    ok $point;
+    ok(1, "thread_entry_point $point");
 
     return $point;
 }
 
-sub response {
-    my ($kernel, $result) = @_[ KERNEL, ARG0 ];
+{
+    my $responses = 0;
 
-    ok($result + 100);
+    sub response {
+        my ($kernel, $result) = @_[ KERNEL, ARG0 ];
 
-    if ($result == 100) {
-        $kernel->yield("shutdown");
+        ok(1, "response $result\n");
+
+        if (++$responses == $TOTAL_JOBS) {
+            $kernel->yield("shutdown");
+        }
     }
 }
 

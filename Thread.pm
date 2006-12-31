@@ -17,7 +17,10 @@ use IO::Handle;
 use POE qw( Pipe::OneWay Filter::Line Wheel::ReadWrite );
 use Fcntl;
 
-*VERSION = \0.013;
+# Circumvent warnings...
+BEGIN { run POE::Kernel }
+
+*VERSION = \0.015;
 
 use constant DEBUG => 0;
 
@@ -40,6 +43,8 @@ sub new {
 
             $kernel->alias_set($opt{Name}) if $opt{Name};
 
+            $heap->{queue} = [];
+
             my ($pipe_in, $pipe_out) = POE::Pipe::OneWay->new;
             $heap->{pipe_out} = $pipe_out;
 
@@ -53,10 +58,8 @@ sub new {
                 );
 
             for (1 .. $opt{StartThreads}) {
-                $kernel->yield("-spawn_thread");
+                $kernel->call($_[SESSION], "-spawn_thread");
             }
-
-            $heap->{queue} = [];
 
             goto $opt{inline_states}{_start} if $opt{inline_states}{_start};
         },
@@ -100,11 +103,16 @@ sub new {
         -collect_garbage => sub {
             DEBUG && warn "GC Called, thread exited";
             
-            my ($kernel, $heap, $tid) = @_[ KERNEL, HEAP, ARG0 ];
+            my ($kernel, $session, $heap, $tid) = 
+                @_[ KERNEL, SESSION, HEAP, ARG0 ];
 
             my $tdsc = delete $heap->{thread}{$tid} or return;
 
             $tdsc->{thread}->join;
+
+            unless ($kernel->refcount_decrement($session->ID, "thread")) {
+                delete $heap->{wheel};
+            }
 
             delete $tdsc->{$_} for keys %$tdsc;
         },
@@ -114,6 +122,9 @@ sub new {
                 @_[ KERNEL, SESSION, HEAP, ARG0 ];
 
             DEBUG && warn "GC Called, thread finished task";
+
+            my $thread = $heap->{thread};
+            my @free   = grep ${ $_->{semaphore} }, values %$thread;
 
             my $queue  = $heap->{queue};
             my $rqueue = $heap->{thread}{$tid}{rqueue};
@@ -132,10 +143,13 @@ sub new {
 
                 $iqueue->enqueue($args);
             }
+            elsif (@free > $opt{MaxFree}) {
+                (shift @free)->{iqueue}->enqueue("last");
+            }
         },
 
         -spawn_thread => sub {
-            my ($kernel, $heap) = @_[ KERNEL, HEAP ];
+            my ($kernel, $session, $heap) = @_[ KERNEL, SESSION, HEAP ];
             
             return if $opt{MaxThreads} == scalar keys %{ $heap->{thread} };
             DEBUG && warn "Spawning a new thread";
@@ -153,6 +167,8 @@ sub new {
                   $rqueue, 
                   fileno($pipe_out),
                   $opt{EntryPoint} );
+
+            $kernel->refcount_increment($session->ID, "thread");
 
             $heap->{thread}{$thread->tid} = { 
                 semaphore   => $semaphore,
@@ -206,8 +222,12 @@ sub new {
         shutdown => sub {
             my ($kernel, $heap) = @_[ KERNEL, HEAP ];
 
+            $heap->{shutdown} = 1;
             $kernel->alias_remove($opt{Name});
-            delete $heap->{wheel};
+
+            for my $thread (values %{ $heap->{thread} }) {
+                $thread->{iqueue}->enqueue("last");
+            }
         },
       },
     );
@@ -224,11 +244,11 @@ sub thread_entry_point {
     # Just incase
     local $\ = "\n";
 
-    while (my $action : shared = $iqueue->dequeue) {
+    while (my $action = $iqueue->dequeue) {
         DEBUG and warn threads->self->tid, ": recieved action";
         $semaphore->down;
 
-        lock $action;
+#       lock $action;
 
         unless (ref $action) {
             if ($action eq "last") {
@@ -239,7 +259,7 @@ sub thread_entry_point {
 
         else { 
             my $arg = $action;
-            lock $arg;
+#           lock $arg;
 
             # Just incase...
             my $result = &share([]);

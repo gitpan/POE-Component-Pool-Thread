@@ -8,18 +8,18 @@ use ExtUtils::MakeMaker;
 open CHANGES, ">>CHANGES" and close CHANGES;
 
 # Dont laugh!
-sub MY::postamble { 
-	q(
-document:
-	$(NOECHO) $(PERLRUN) "-MFile::Find"                       \
-	 -le 'find { wanted => sub { if (m/otl$$/) { \
-	 		my $$pod = $$_; \
-			$$pod =~ s/otl/pod/; \
-			print "Converting $$File::Find::name to $$pod"; \
-			system("otl2pod $$_ > $$pod"); \
-		} } }, "lib";'
-	 );
-}
+#sub MY::postamble { 
+#	q(
+#document:
+#	$(NOECHO) $(PERLRUN) "-MFile::Find"                       \
+#	 -le 'find { wanted => sub { if (m/otl$$/) { \
+#	 		my $$pod = $$_; \
+#			$$pod =~ s/otl/pod/; \
+#			print "Converting $$File::Find::name to $$pod"; \
+#			system("otl2pod $$_ > $$pod"); \
+#		} } }, "lib";'
+#	 );
+#}
 
 WriteMakefile
   ( NAME         => 'POE::Component::Pool::Thread',
@@ -27,9 +27,13 @@ WriteMakefile
     ABSTRACT     => 'A POE Component for managing Boss/Worker Thread pools',
     VERSION_FROM => 'Thread.pm',
 
-    PREREQ_PM    => { POE      => 0.30 },
+    PREREQ_PM    => {
+        POE      => 0.30,
+        threads  => 1.03,
+    },
+
     dist         =>
-    { DIST_DEFAULT => "tardist document",
+    { DIST_DEFAULT => "tardist",
 	  COMPRESS   => 'gzip -9f',
       SUFFIX     => 'gz',
       PREOP      => ( 'svn log | ' .
